@@ -1,5 +1,7 @@
 # NodeScope · 节点观测台
 
+[下载 Windows 便携版（x64）](https://github.com/wangyz0518-bit/NodeScope/releases/latest/download/NodeScope-Windows-portable.zip) · [发布说明与校验文件](https://github.com/wangyz0518-bit/NodeScope/releases/latest)
+
 一个在本机运行的代理节点诊断工具。用紧凑的中文深色界面，按次数或时长持续检测当前节点访问 ChatGPT、Cloudflare、YouTube、Google 及自定义网址的情况，观察响应延迟、成功率和错误原因。
 
 ## 下载使用
