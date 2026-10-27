@@ -1,0 +1,14 @@
+{
+  "name": "nodescope",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地代理节点连接诊断工具",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.cjs --desktop",
+    "serve": "node server.cjs",
+    "test": "node --test tests/*.test.cjs",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1"
+  }
+}
+

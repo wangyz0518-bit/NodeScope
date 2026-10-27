@@ -1,0 +1,9 @@
+data/
+runtime/
+dist/
+NodeScope.exe
+launcher/*.ico
+node_modules/
+
+tests/tmp-*/
+*.log

@@ -1,0 +1,129 @@
+name: Windows portable release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download and verify official Node.js runtime
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtimeVersion = '24.19.0'
+          $runtimeArchive = "node-v$runtimeVersion-win-x64.zip"
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP 'nodescope-runtime'
+          New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+          $archivePath = Join-Path $runtimeRoot $runtimeArchive
+          $sumsPath = Join-Path $runtimeRoot 'SHASUMS256.txt'
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$runtimeVersion/$runtimeArchive" -OutFile $archivePath
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$runtimeVersion/SHASUMS256.txt" -OutFile $sumsPath
+          $matchingLine = @(Get-Content -LiteralPath $sumsPath | Where-Object { ($_ -split '\s+', 2)[1] -eq $runtimeArchive })
+          if ($matchingLine.Count -ne 1) { throw 'Could not identify the official runtime SHA256.' }
+          $expectedHash = ($matchingLine[0] -split '\s+', 2)[0]
+          $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+          if ($actualHash -ine $expectedHash) { throw 'Node.js runtime SHA256 mismatch.' }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $runtimeRoot -Force
+          $nodeRoot = Join-Path $runtimeRoot "node-v$runtimeVersion-win-x64"
+          if (-not (Test-Path -LiteralPath (Join-Path $nodeRoot 'LICENSE'))) { throw 'The runtime license is missing.' }
+          "NODESCOPE_BUILD_NODE=$nodeRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify version and run tests
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '\A[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\z') { throw 'Invalid package version.' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { throw 'The tag must match the package.json version.' }
+          $testFiles = @(Get-ChildItem -LiteralPath tests -Filter '*.test.cjs' | ForEach-Object { $_.FullName })
+          if ($testFiles.Count -eq 0) { throw 'No test files were found.' }
+          & (Join-Path $env:NODESCOPE_BUILD_NODE 'node.exe') --test @testFiles
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+
+      - name: Build Windows portable package
+        run: |
+          ./scripts/build.ps1 -RuntimePath (Join-Path $env:NODESCOPE_BUILD_NODE 'node.exe') -RuntimeLicensePath (Join-Path $env:NODESCOPE_BUILD_NODE 'LICENSE') -Package -Zip
+          if ($LASTEXITCODE -ne 0) { throw 'Portable build failed.' }
+          if (@(Get-ChildItem -LiteralPath dist/NodeScope/data -Force).Count -ne 0) { throw 'The release package must not contain runtime data.' }
+          $releaseVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          Set-Content -LiteralPath dist/release-version.txt -Value ("v" + $releaseVersion) -Encoding utf8
+
+      - name: Save portable release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: nodescope-windows-portable
+          path: |
+            dist/NodeScope-Windows-portable.zip
+            dist/NodeScope-Windows-portable.zip.sha256
+            dist/release-version.txt
+            scripts/release-notes.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    if: >-
+      github.event_name == 'push' &&
+      github.event.deleted == false &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.ref == 'refs/heads/main' &&
+        contains(github.event.head_commit.message, '[release]')))
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested release files
+        uses: actions/download-artifact@v8
+        with:
+          name: nodescope-windows-portable
+          path: release-assets
+
+      - name: Create release and publish portable download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseRepo = $env:GITHUB_REPOSITORY
+          $archive = 'release-assets/dist/NodeScope-Windows-portable.zip'
+          $checksum = $archive + '.sha256'
+          $notes = 'release-assets/scripts/release-notes.md'
+          $versionFile = 'release-assets/dist/release-version.txt'
+          foreach ($asset in @($archive, $checksum, $notes, $versionFile)) {
+            if (-not (Test-Path -LiteralPath $asset)) { throw "Missing release file: $asset" }
+          }
+          $releaseTag = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+          if ($releaseTag -notmatch '\Av[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\z') { throw 'Invalid release tag.' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $releaseTag -ne $env:GITHUB_REF_NAME) { throw 'Release tag mismatch.' }
+          gh release view "$releaseTag" --repo "$releaseRepo" --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$releaseTag" "$archive" "$checksum" --clobber --repo "$releaseRepo"
+          } else {
+            $createArgs = @('release', 'create', $releaseTag, $archive, $checksum,
+              '--title', "NodeScope $releaseTag", '--notes-file', $notes, '--repo', $releaseRepo)
+            if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              $createArgs += '--verify-tag'
+            } else {
+              $createArgs += @('--target', $env:GITHUB_SHA)
+            }
+            & gh @createArgs
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }
